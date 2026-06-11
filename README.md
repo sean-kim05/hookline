@@ -15,15 +15,26 @@ consumer endpoints with:
 
 ## Status
 
-🚧 **Week 1** — queue core abstractions, in-memory reference implementation,
-and the test suite that all storage backends must pass. See
-[docs/DESIGN.md](docs/DESIGN.md) for the architecture and roadmap.
+🚧 **Weeks 2–3** — shared conformance suite (16 cases incl. a model-based
+randomized property test) plus the PostgreSQL backend
+(`SELECT ... FOR UPDATE SKIP LOCKED`). Both the in-memory and Postgres backends
+pass the same suite unmodified. See [docs/DESIGN.md](docs/DESIGN.md) for the
+architecture and roadmap.
 
 ## Development
 
 ```sh
-go test -race ./...
+# Fast path: in-memory backend only (Postgres tests skip without a database).
+go test ./...
+
+# Full suite, including the Postgres backend, against a disposable database:
+docker compose -f docker-compose.test.yml up -d
+HOOKLINE_TEST_DATABASE_URL=postgres://hookline:hookline@localhost:5432/hookline go test ./...
+docker compose -f docker-compose.test.yml down -v
 ```
+
+CI runs the whole suite with the race detector (`go test -race`) against a
+Postgres service container on every push.
 
 ## Architecture (short version)
 

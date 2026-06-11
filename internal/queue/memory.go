@@ -34,12 +34,25 @@ type MemoryQueue struct {
 // Compile-time check that MemoryQueue satisfies the Queue interface.
 var _ Queue = (*MemoryQueue)(nil)
 
+// MemoryOption configures a MemoryQueue.
+type MemoryOption func(*MemoryQueue)
+
+// WithClock overrides the queue's clock. Tests use this to drive lease expiry
+// and retry scheduling deterministically.
+func WithClock(now func() time.Time) MemoryOption {
+	return func(q *MemoryQueue) { q.now = now }
+}
+
 // NewMemoryQueue returns an empty in-memory queue.
-func NewMemoryQueue() *MemoryQueue {
-	return &MemoryQueue{
+func NewMemoryQueue(opts ...MemoryOption) *MemoryQueue {
+	q := &MemoryQueue{
 		msgs: make(map[string]*memMessage),
 		now:  time.Now,
 	}
+	for _, opt := range opts {
+		opt(q)
+	}
+	return q
 }
 
 // Enqueue accepts an event for delivery and returns its message ID.

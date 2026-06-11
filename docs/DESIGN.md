@@ -32,7 +32,7 @@ interface (`internal/queue`) with three planned implementations:
 | Implementation | Purpose | Status |
 |---|---|---|
 | `MemoryQueue` | Reference implementation; used by tests and local dev | Done (week 1) |
-| `PostgresQueue` | MVP backend — `SELECT ... FOR UPDATE SKIP LOCKED` | Planned (week 3-4) |
+| `PostgresQueue` | MVP backend — `SELECT ... FOR UPDATE SKIP LOCKED` | Done (week 2-3) |
 | `WALQueue` | The headline: segmented append-only log + offsets | Planned (week 5-7) |
 
 All implementations must pass one shared conformance test suite. If the WAL
@@ -102,12 +102,21 @@ quoted about Hookline is attributable to a live graph.
 
 ## 7. Testing strategy
 
-- **Conformance suite** shared by all `Queue` implementations (lease
-  exclusivity, fencing, retry timing, FIFO-ish ordering) using a fake clock —
-  no sleeps, no flaky timing.
-- **Property tests** on the queue core (e.g., "no message is ever leased to
-  two live leases simultaneously"; "every enqueued message is eventually
-  acked exactly once or dead-lettered").
+- **Conformance suite** (`internal/queue/queuetest`) shared by all `Queue`
+  implementations (lease exclusivity, fencing, retry timing, FIFO-ish ordering)
+  using an injected clock — no sleeps, no flaky timing. The in-memory and
+  Postgres backends pass it unmodified; the WAL engine will too. Done.
+- **Model-based property test** (part of the conformance suite): an independent
+  in-memory model of the queue contract is driven through long random op
+  sequences (enqueue/lease/ack/nack/advance-time, including deliberate
+  stale-token probes) in lockstep with the implementation under test, asserting
+  they agree after every step. Fixed seeds keep failures reproducible. This is
+  how we get "no message is ever leased to two live leases simultaneously" and
+  "attempt counts and stale-lease rejections match the contract" without
+  enumerating interleavings by hand. Done.
+- **Concurrent claim test**: 8 goroutines hammer `Lease` over 100 messages and
+  assert no message is handed to two live leases — the race-detector workout
+  for `FOR UPDATE SKIP LOCKED` and the in-memory mutex. Done.
 - **Chaos harness in CI** (week 7): kill -9 the broker mid-write under load,
   restart, and assert zero acknowledged-event loss — repeated 100+ times per
   CI run. toxiproxy injects network faults between workers and endpoints.
