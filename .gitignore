@@ -1,0 +1,22 @@
+# Compiled binaries
+/bin/
+/hookline
+*.exe
+
+# Test & coverage artifacts
+*.out
+coverage.*
+
+# Durable queue data / local state
+/data/
+*.wal
+
+# Environment
+.env
+.env.local
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
