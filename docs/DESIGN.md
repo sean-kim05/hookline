@@ -68,12 +68,26 @@ This is the same fencing-token pattern used in distributed lock services
 
 ## 3. Retry policy
 
-- Exponential backoff with full jitter: `delay = rand(0, base * 2^attempt)`,
-  capped at a maximum delay. Jitter prevents synchronized retry storms when an
-  endpoint comes back after an outage.
+Implemented by the delivery worker (`internal/delivery`), which leases ready
+messages, POSTs each to its endpoint, and routes the outcome:
+
+- A 2xx response **acks** the message (removed from the queue). Any other
+  status, or a transport error, is a retryable failure.
+- A failure **nacks** with exponential backoff and full jitter:
+  `delay = uniform(0, min(max, base * 2^(attempt-1)))`. The full-jitter sample
+  (over the whole interval, not a fixed delay) is what prevents a thundering
+  herd — without it, every event that failed during an outage retries in
+  lockstep the instant the endpoint recovers and knocks it over again.
 - After a configurable max attempts, the message moves to a **dead-letter
-  queue** instead of being dropped. DLQ'd events are visible in the dashboard
-  and can be replayed manually.
+  queue** instead of being dropped. The worker records to the DLQ sink *before*
+  acking the message off the queue, so a crash in between re-delivers rather
+  than loses the event. DLQ'd events will be visible in the dashboard and
+  replayable (week 8).
+
+Deliveries within a batch run concurrently (bounded). A worker whose lease
+lapses mid-delivery gets `ErrStaleLease` on its ack/nack — the fencing token
+doing its job — and simply drops the result; the message has already been
+re-leased elsewhere.
 
 ## 4. Storage split: queue vs. audit log
 

@@ -15,11 +15,14 @@ consumer endpoints with:
 
 ## Status
 
-🚧 **Weeks 2–3** — shared conformance suite (16 cases incl. a model-based
-randomized property test) plus the PostgreSQL backend
-(`SELECT ... FOR UPDATE SKIP LOCKED`). Both the in-memory and Postgres backends
-pass the same suite unmodified. See [docs/DESIGN.md](docs/DESIGN.md) for the
-architecture and roadmap.
+🚧 **Week 4** — the delivery worker: leases ready messages, signs and POSTs
+each to its endpoint, and acks on success, reschedules with exponential
+backoff + full jitter on failure, or dead-letters once attempts are exhausted.
+
+Earlier: the `Queue` interface with in-memory and PostgreSQL
+(`SELECT ... FOR UPDATE SKIP LOCKED`) backends, both passing one shared
+conformance suite (16 cases incl. a model-based randomized property test). See
+[docs/DESIGN.md](docs/DESIGN.md) for the architecture and roadmap.
 
 ## Development
 
