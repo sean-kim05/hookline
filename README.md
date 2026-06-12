@@ -15,14 +15,22 @@ consumer endpoints with:
 
 ## Status
 
-🚧 **Week 4** — the delivery worker: leases ready messages, signs and POSTs
-each to its endpoint, and acks on success, reschedules with exponential
-backoff + full jitter on failure, or dead-letters once attempts are exhausted.
+🚧 **Week 5 (in progress)** — the ingestion API: `POST /v1/events` validates
+and enqueues events, behind bearer API-key auth. Still to come this week: the
+endpoint registry (per-endpoint signing secrets) and the Postgres delivery
+audit log.
 
-Earlier: the `Queue` interface with in-memory and PostgreSQL
-(`SELECT ... FOR UPDATE SKIP LOCKED`) backends, both passing one shared
-conformance suite (16 cases incl. a model-based randomized property test). See
-[docs/DESIGN.md](docs/DESIGN.md) for the architecture and roadmap.
+Done so far:
+
+- **Queue** interface with in-memory and PostgreSQL
+  (`SELECT ... FOR UPDATE SKIP LOCKED`) backends, both passing one shared
+  conformance suite (16 cases incl. a model-based randomized property test).
+- **Delivery worker** — leases, signs, and POSTs each event; acks on success,
+  reschedules with exponential backoff + full jitter on failure, or
+  dead-letters once attempts are exhausted.
+- **Ingestion API** — authenticated `POST /v1/events`.
+
+See [docs/DESIGN.md](docs/DESIGN.md) for the architecture and roadmap.
 
 ## Development
 
