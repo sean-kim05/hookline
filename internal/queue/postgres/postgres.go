@@ -54,8 +54,9 @@ CREATE INDEX IF NOT EXISTS queue_messages_ready_idx
 
 // Queue is a PostgreSQL-backed queue.Queue.
 type Queue struct {
-	pool *pgxpool.Pool
-	now  func() time.Time
+	pool     *pgxpool.Pool
+	now      func() time.Time
+	ownsPool bool // true when Open created the pool, so Close should close it
 }
 
 // Compile-time check that Queue satisfies the queue.Queue interface.
@@ -81,11 +82,22 @@ func Open(ctx context.Context, dsn string, opts ...Option) (*Queue, error) {
 		pool.Close()
 		return nil, fmt.Errorf("postgres: ping: %w", err)
 	}
-	q := &Queue{pool: pool, now: time.Now}
+	q := &Queue{pool: pool, now: time.Now, ownsPool: true}
 	for _, opt := range opts {
 		opt(q)
 	}
 	return q, nil
+}
+
+// NewQueue wraps an existing connection pool, letting the queue share one pool
+// with the audit log, endpoint registry, and dead-letter store. The caller owns
+// the pool; Close does not close it.
+func NewQueue(pool *pgxpool.Pool, opts ...Option) *Queue {
+	q := &Queue{pool: pool, now: time.Now, ownsPool: false}
+	for _, opt := range opts {
+		opt(q)
+	}
+	return q
 }
 
 // Migrate creates the queue table if it does not exist.
@@ -254,8 +266,11 @@ func classify(applied, existed bool) error {
 	}
 }
 
-// Close releases the connection pool.
+// Close releases the connection pool if this queue created it. When the pool
+// was supplied via NewQueue it is owned by the caller and left open.
 func (q *Queue) Close() error {
-	q.pool.Close()
+	if q.ownsPool {
+		q.pool.Close()
+	}
 	return nil
 }

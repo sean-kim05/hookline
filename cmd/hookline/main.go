@@ -1,11 +1,15 @@
-// Command hookline runs the Hookline service: the ingestion API and the
-// delivery worker, sharing one queue. This wiring uses the in-memory queue, so
-// it is self-contained for local runs and demos; the Postgres-backed
-// deployment configuration arrives with the rest of week 5.
+// Command hookline runs the Hookline service: the ingestion + management API
+// and the delivery worker, sharing one queue.
+//
+// By default it runs entirely in memory, so it is self-contained for local runs
+// and demos. Set -database-url (or HOOKLINE_DATABASE_URL) to run on PostgreSQL,
+// which makes the queue, audit log, endpoint registry, and dead-letter queue
+// durable across restarts.
 //
 // Usage:
 //
 //	hookline -addr :8080 -api-key dev-key -secret whsec_dev
+//	hookline -database-url postgres://hookline:hookline@localhost:5432/hookline
 //
 // Submit an event:
 //
@@ -18,6 +22,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -25,26 +30,56 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/sean-kim05/hookline/internal/api"
+	"github.com/sean-kim05/hookline/internal/audit"
 	"github.com/sean-kim05/hookline/internal/delivery"
+	"github.com/sean-kim05/hookline/internal/endpoint"
 	"github.com/sean-kim05/hookline/internal/queue"
+	"github.com/sean-kim05/hookline/internal/queue/postgres"
 )
 
+// backend bundles the storage components, which differ between the in-memory
+// and Postgres configurations but are wired into the API and worker identically.
+type backend struct {
+	queue    queue.Queue
+	audit    audit.Log
+	registry endpoint.Registry
+	dlq      delivery.DeadLetterStore
+	close    func()
+}
+
 func main() {
-	addr := flag.String("addr", ":8080", "HTTP listen address for the ingestion API")
+	addr := flag.String("addr", ":8080", "HTTP listen address for the API")
 	apiKey := flag.String("api-key", env("HOOKLINE_API_KEY", "dev-key"), "producer API key")
-	secret := flag.String("secret", env("HOOKLINE_SIGNING_SECRET", "whsec_dev"), "HMAC signing secret for deliveries")
+	secret := flag.String("secret", env("HOOKLINE_SIGNING_SECRET", "whsec_dev"), "fallback HMAC signing secret for unregistered endpoints")
+	databaseURL := flag.String("database-url", env("HOOKLINE_DATABASE_URL", ""), "PostgreSQL DSN; empty runs in memory")
 	concurrency := flag.Int("concurrency", 8, "concurrent deliveries")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	q := queue.NewMemoryQueue()
-	defer q.Close()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	be, err := newBackend(ctx, *databaseURL, log)
+	if err != nil {
+		log.Error("hookline: configure storage", "err", err)
+		os.Exit(1)
+	}
+	defer be.close()
+
+	// Deliveries are signed with each endpoint's registered secret, falling back
+	// to -secret for endpoints that were never registered.
+	signers := endpoint.NewSignerSource(be.registry, delivery.NewSigner(*secret))
+	deliverer := delivery.NewSigningDeliverer(&http.Client{Timeout: 10 * time.Second}, signers)
 
 	worker, err := delivery.New(delivery.Config{
-		Queue:       q,
-		Deliverer:   delivery.NewHTTPDeliverer(&http.Client{Timeout: 10 * time.Second}, delivery.NewSigner(*secret)),
+		Queue:       be.queue,
+		Deliverer:   deliverer,
+		Sink:        be.dlq,
+		Audit:       be.audit,
 		Concurrency: *concurrency,
 		Logger:      log,
 	})
@@ -54,9 +89,12 @@ func main() {
 	}
 
 	srv, err := api.NewServer(api.Config{
-		Queue:  q,
-		Auth:   api.NewStaticKeyAuth(map[string]string{"default": *apiKey}),
-		Logger: log,
+		Queue:    be.queue,
+		Auth:     api.NewStaticKeyAuth(map[string]string{"default": *apiKey}),
+		Registry: be.registry,
+		Audit:    be.audit,
+		DLQ:      be.dlq,
+		Logger:   log,
 	})
 	if err != nil {
 		log.Error("hookline: configure api", "err", err)
@@ -64,10 +102,6 @@ func main() {
 	}
 
 	httpServer := &http.Server{Addr: *addr, Handler: srv.Handler()}
-
-	// One context cancels both the worker and the HTTP server on SIGINT/SIGTERM.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	go func() {
 		log.Info("hookline: delivery worker started", "concurrency", *concurrency)
@@ -78,7 +112,7 @@ func main() {
 	}()
 
 	go func() {
-		log.Info("hookline: ingestion API listening", "addr", *addr)
+		log.Info("hookline: API listening", "addr", *addr)
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Error("hookline: http server", "err", err)
 			stop()
@@ -93,6 +127,57 @@ func main() {
 	if err := httpServer.Shutdown(shutCtx); err != nil {
 		log.Error("hookline: shutdown", "err", err)
 	}
+}
+
+// newBackend builds the storage layer. An empty databaseURL selects the
+// in-memory backend; otherwise it connects to Postgres, sharing one pool across
+// the queue, audit log, registry, and DLQ, and migrates every table.
+func newBackend(ctx context.Context, databaseURL string, log *slog.Logger) (backend, error) {
+	if databaseURL == "" {
+		log.Info("hookline: using in-memory storage (set -database-url for durability)")
+		return backend{
+			queue:    queue.NewMemoryQueue(),
+			audit:    audit.NewMemoryLog(0),
+			registry: endpoint.NewMemoryRegistry(),
+			dlq:      &delivery.MemoryDeadLetterSink{},
+			close:    func() {},
+		}, nil
+	}
+
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		return backend{}, fmt.Errorf("connect: %w", err)
+	}
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		return backend{}, fmt.Errorf("ping: %w", err)
+	}
+
+	q := postgres.NewQueue(pool)
+	auditLog := audit.NewPostgresLog(pool)
+	reg := endpoint.NewPostgresRegistry(pool)
+	dlq := delivery.NewPostgresDeadLetterSink(pool)
+
+	for name, migrate := range map[string]func(context.Context) error{
+		"queue":    q.Migrate,
+		"audit":    auditLog.Migrate,
+		"registry": reg.Migrate,
+		"dlq":      dlq.Migrate,
+	} {
+		if err := migrate(ctx); err != nil {
+			pool.Close()
+			return backend{}, fmt.Errorf("migrate %s: %w", name, err)
+		}
+	}
+
+	log.Info("hookline: using PostgreSQL storage")
+	return backend{
+		queue:    q,
+		audit:    auditLog,
+		registry: reg,
+		dlq:      dlq,
+		close:    pool.Close,
+	}, nil
 }
 
 func env(key, fallback string) string {

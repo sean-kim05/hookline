@@ -27,23 +27,49 @@ type Deliverer interface {
 	Deliver(ctx context.Context, msg queue.Message) Result
 }
 
-// HTTPDeliverer delivers messages over HTTP, signing each request.
+// SignerSource resolves the signing key to use for an endpoint. Per-endpoint
+// secrets (from the endpoint registry) are what let each consumer verify
+// deliveries with a key only it and Hookline share. A nil return means the
+// delivery is sent unsigned.
+type SignerSource interface {
+	SignerFor(ctx context.Context, endpoint string) *Signer
+}
+
+// StaticSigner is a SignerSource that uses one signer for every endpoint. It is
+// the single-secret configuration (and the zero value signs nothing).
+type StaticSigner struct{ Signer *Signer }
+
+// SignerFor returns the single configured signer regardless of endpoint.
+func (s StaticSigner) SignerFor(context.Context, string) *Signer { return s.Signer }
+
+// HTTPDeliverer delivers messages over HTTP, signing each request with the key
+// its SignerSource resolves for the destination endpoint.
 type HTTPDeliverer struct {
-	client *http.Client
-	signer *Signer
-	now    func() time.Time
+	client  *http.Client
+	signers SignerSource
+	now     func() time.Time
 }
 
 var _ Deliverer = (*HTTPDeliverer)(nil)
 
-// NewHTTPDeliverer returns a deliverer using the given client and signer. A nil
-// client uses a default with a sane timeout; a nil signer sends unsigned
-// requests (useful in tests).
+// NewHTTPDeliverer returns a deliverer that signs every delivery with signer. A
+// nil client uses a default with a sane timeout; a nil signer sends unsigned
+// requests (useful in tests). For per-endpoint signing keys, use
+// NewSigningDeliverer with a registry-backed SignerSource.
 func NewHTTPDeliverer(client *http.Client, signer *Signer) *HTTPDeliverer {
+	return NewSigningDeliverer(client, StaticSigner{Signer: signer})
+}
+
+// NewSigningDeliverer returns a deliverer that resolves a per-endpoint signing
+// key from signers for each delivery.
+func NewSigningDeliverer(client *http.Client, signers SignerSource) *HTTPDeliverer {
 	if client == nil {
 		client = &http.Client{Timeout: 10 * time.Second}
 	}
-	return &HTTPDeliverer{client: client, signer: signer, now: time.Now}
+	if signers == nil {
+		signers = StaticSigner{}
+	}
+	return &HTTPDeliverer{client: client, signers: signers, now: time.Now}
 }
 
 // Deliver POSTs the message payload to its endpoint with signature and metadata
@@ -70,9 +96,9 @@ func (d *HTTPDeliverer) Deliver(ctx context.Context, msg queue.Message) Result {
 	if ev.IdempotencyKey != "" {
 		req.Header.Set(HeaderIdempotencyKey, ev.IdempotencyKey)
 	}
-	if d.signer != nil {
+	if signer := d.signers.SignerFor(ctx, ev.Endpoint); signer != nil {
 		req.Header.Set(HeaderTimestamp, strconv.FormatInt(start.Unix(), 10))
-		req.Header.Set(HeaderSignature, d.signer.Sign(start, ev.Payload))
+		req.Header.Set(HeaderSignature, signer.Sign(start, ev.Payload))
 	}
 
 	resp, err := d.client.Do(req)
