@@ -8,6 +8,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sean-kim05/hookline/internal/audit"
+	"github.com/sean-kim05/hookline/internal/id"
 	"github.com/sean-kim05/hookline/internal/queue"
 )
 
@@ -17,6 +19,7 @@ type Config struct {
 	Queue     queue.Queue
 	Deliverer Deliverer
 	Sink      DeadLetterSink // where exhausted messages go; defaults to an in-memory sink
+	Audit     audit.Log      // records every attempt; defaults to audit.NopLog
 	Backoff   Backoff        // retry schedule; defaults to 1s base, 1h max
 
 	MaxAttempts  int           // dead-letter after this many failed attempts (default 12)
@@ -35,6 +38,7 @@ type Worker struct {
 	q           queue.Queue
 	deliverer   Deliverer
 	sink        DeadLetterSink
+	audit       audit.Log
 	backoff     Backoff
 	maxAttempts int
 	batchSize   int
@@ -58,6 +62,7 @@ func New(cfg Config) (*Worker, error) {
 		q:           cfg.Queue,
 		deliverer:   cfg.Deliverer,
 		sink:        cfg.Sink,
+		audit:       cfg.Audit,
 		backoff:     cfg.Backoff,
 		maxAttempts: cfg.MaxAttempts,
 		batchSize:   cfg.BatchSize,
@@ -69,6 +74,9 @@ func New(cfg Config) (*Worker, error) {
 	}
 	if w.sink == nil {
 		w.sink = &MemoryDeadLetterSink{}
+	}
+	if w.audit == nil {
+		w.audit = audit.NopLog{}
 	}
 	if w.backoff.Base <= 0 && w.backoff.Max <= 0 {
 		w.backoff = NewBackoff(time.Second, time.Hour)
@@ -157,6 +165,7 @@ func (w *Worker) handle(ctx context.Context, l queue.Lease) {
 	res := w.deliverer.Deliver(ctx, l.Message)
 
 	if res.Success {
+		w.record(ctx, l, res, audit.OutcomeDelivered)
 		if err := w.q.Ack(ctx, l.Message.ID, l.Token); err != nil {
 			// ErrStaleLease here means our lease lapsed and someone else
 			// re-leased the message; it may be delivered again. That is the
@@ -171,6 +180,7 @@ func (w *Worker) handle(ctx context.Context, l queue.Lease) {
 		return
 	}
 
+	w.record(ctx, l, res, audit.OutcomeRetrying)
 	delay := w.backoff.Delay(l.Message.Attempts)
 	if err := w.q.Nack(ctx, l.Message.ID, l.Token, delay); err != nil {
 		w.logAckErr("nack after failure", l, err)
@@ -179,6 +189,30 @@ func (w *Worker) handle(ctx context.Context, l queue.Lease) {
 	w.log.Debug("hookline: delivery failed, rescheduled",
 		"message", l.Message.ID, "attempt", l.Message.Attempts,
 		"status", res.StatusCode, "retry_in", delay)
+}
+
+// record writes one attempt to the audit log. A failure to record must never
+// fail the delivery itself, so it is only logged.
+func (w *Worker) record(ctx context.Context, l queue.Lease, res Result, outcome audit.Outcome) {
+	errMsg := ""
+	if res.Err != nil {
+		errMsg = res.Err.Error()
+	}
+	a := audit.Attempt{
+		ID:         id.New(),
+		MessageID:  l.Message.ID,
+		EventID:    l.Message.Event.ID,
+		Endpoint:   l.Message.Event.Endpoint,
+		Attempt:    l.Message.Attempts,
+		Outcome:    outcome,
+		StatusCode: res.StatusCode,
+		Duration:   res.Duration,
+		Error:      errMsg,
+		At:         w.now(),
+	}
+	if err := w.audit.Record(ctx, a); err != nil {
+		w.log.Error("hookline: record attempt", "message", l.Message.ID, "err", err)
+	}
 }
 
 // deadLetter records an exhausted message, then removes it from the queue.
@@ -191,6 +225,8 @@ func (w *Worker) deadLetter(ctx context.Context, l queue.Lease, res Result) {
 	} else {
 		reason += fmt.Sprintf(": last status %d", res.StatusCode)
 	}
+
+	w.record(ctx, l, res, audit.OutcomeDeadLettered)
 
 	dl := DeadLetter{Message: l.Message, Reason: reason, FailedAt: w.now()}
 	if err := w.sink.DeadLetter(ctx, dl); err != nil {
