@@ -59,6 +59,10 @@ func main() {
 	databaseURL := flag.String("database-url", env("HOOKLINE_DATABASE_URL", ""), "PostgreSQL DSN; empty runs in memory")
 	walDir := flag.String("wal-dir", env("HOOKLINE_WAL_DIR", ""), "directory for the WAL queue; durable queue with in-memory audit/registry/DLQ (ignored if -database-url is set)")
 	concurrency := flag.Int("concurrency", 8, "concurrent deliveries")
+	circuitThreshold := flag.Int("circuit-threshold", 5, "consecutive failures that open an endpoint's circuit breaker")
+	circuitCooldown := flag.Duration("circuit-cooldown", 30*time.Second, "how long an open circuit breaker stays open")
+	rateLimit := flag.Float64("rate-limit", 0, "max deliveries per second per endpoint host (0 disables)")
+	rateBurst := flag.Float64("rate-burst", 0, "burst size for the per-endpoint rate limiter (0 = rate-limit)")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -81,7 +85,15 @@ func main() {
 	// Deliveries are signed with each endpoint's registered secret, falling back
 	// to -secret for endpoints that were never registered.
 	signers := endpoint.NewSignerSource(be.registry, delivery.NewSigner(*secret))
-	deliverer := delivery.NewSigningDeliverer(&http.Client{Timeout: 10 * time.Second}, signers)
+
+	// Delivery stack, innermost first: HTTP POST -> circuit breaker (stop
+	// hammering a down endpoint) -> rate limiter (respect per-endpoint limits).
+	var deliverer delivery.Deliverer = delivery.NewSigningDeliverer(&http.Client{Timeout: 10 * time.Second}, signers)
+	deliverer = delivery.NewCircuitBreaker(deliverer, *circuitThreshold, *circuitCooldown)
+	if *rateLimit > 0 {
+		deliverer = delivery.NewRateLimiter(deliverer, *rateLimit, *rateBurst)
+		log.Info("hookline: per-endpoint rate limit enabled", "per_sec", *rateLimit, "burst", *rateBurst)
+	}
 
 	worker, err := delivery.New(delivery.Config{
 		Queue:       be.queue,
