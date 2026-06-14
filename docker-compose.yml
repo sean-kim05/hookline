@@ -1,0 +1,60 @@
+# Full Hookline stack for local runs and single-VPS deployment:
+# the service on PostgreSQL, with Prometheus scraping it and Grafana
+# pre-provisioned with a dashboard.
+#
+#   docker compose up -d --build
+#   open http://localhost:3000   (Grafana, admin/admin)
+#
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: hookline
+      POSTGRES_PASSWORD: hookline
+      POSTGRES_DB: hookline
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hookline"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  hookline:
+    build: .
+    environment:
+      HOOKLINE_DATABASE_URL: postgres://hookline:hookline@postgres:5432/hookline
+      HOOKLINE_API_KEY: ${HOOKLINE_API_KEY:-dev-key}
+      HOOKLINE_SIGNING_SECRET: ${HOOKLINE_SIGNING_SECRET:-whsec_dev}
+    command: ["-addr", ":8080", "-concurrency", "16"]
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    depends_on:
+      - hookline
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+
+volumes:
+  pgdata:

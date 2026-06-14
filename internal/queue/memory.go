@@ -156,5 +156,13 @@ func (q *MemoryQueue) Nack(_ context.Context, mid string, token uint64, retryAft
 	return nil
 }
 
+// Depth reports how many messages are currently in the queue (ready, in flight,
+// or scheduled for retry). It powers the queue-depth metric.
+func (q *MemoryQueue) Depth(_ context.Context) (int, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return len(q.msgs), nil
+}
+
 // Close is a no-op for the in-memory queue.
 func (q *MemoryQueue) Close() error { return nil }

@@ -36,6 +36,7 @@ import (
 	"github.com/sean-kim05/hookline/internal/audit"
 	"github.com/sean-kim05/hookline/internal/delivery"
 	"github.com/sean-kim05/hookline/internal/endpoint"
+	"github.com/sean-kim05/hookline/internal/metrics"
 	"github.com/sean-kim05/hookline/internal/queue"
 	"github.com/sean-kim05/hookline/internal/queue/postgres"
 )
@@ -70,6 +71,11 @@ func main() {
 	}
 	defer be.close()
 
+	// Metrics ride on the audit hook (delivery counters/latency) and an HTTP
+	// middleware (request counters/latency); the queue depth is sampled below.
+	m := metrics.New()
+	be.audit = m.Instrument(be.audit)
+
 	// Deliveries are signed with each endpoint's registered secret, falling back
 	// to -secret for endpoints that were never registered.
 	signers := endpoint.NewSignerSource(be.registry, delivery.NewSigner(*secret))
@@ -101,7 +107,17 @@ func main() {
 		os.Exit(1)
 	}
 
-	httpServer := &http.Server{Addr: *addr, Handler: srv.Handler()}
+	// Root mux: /metrics is unwrapped (so scrapes don't pollute request
+	// metrics); everything else goes through the API behind the HTTP middleware.
+	root := http.NewServeMux()
+	root.Handle("/metrics", m.Handler())
+	root.Handle("/", m.HTTPMiddleware(srv.Handler()))
+	httpServer := &http.Server{Addr: *addr, Handler: root}
+
+	// Sample queue depth in the background when the backend supports it.
+	if src, ok := be.queue.(metrics.DepthSource); ok {
+		go m.PollDepth(ctx, src, 5*time.Second)
+	}
 
 	go func() {
 		log.Info("hookline: delivery worker started", "concurrency", *concurrency)

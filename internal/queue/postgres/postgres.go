@@ -266,6 +266,16 @@ func classify(applied, existed bool) error {
 	}
 }
 
+// Depth reports how many messages are currently in the queue. It powers the
+// queue-depth metric.
+func (q *Queue) Depth(ctx context.Context) (int, error) {
+	var n int
+	if err := q.pool.QueryRow(ctx, `SELECT count(*) FROM queue_messages`).Scan(&n); err != nil {
+		return 0, fmt.Errorf("postgres: depth: %w", err)
+	}
+	return n, nil
+}
+
 // Close releases the connection pool if this queue created it. When the pool
 // was supplied via NewQueue it is owned by the caller and left open.
 func (q *Queue) Close() error {
