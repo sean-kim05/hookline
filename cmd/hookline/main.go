@@ -39,6 +39,7 @@ import (
 	"github.com/sean-kim05/hookline/internal/metrics"
 	"github.com/sean-kim05/hookline/internal/queue"
 	"github.com/sean-kim05/hookline/internal/queue/postgres"
+	"github.com/sean-kim05/hookline/internal/queue/wal"
 )
 
 // backend bundles the storage components, which differ between the in-memory
@@ -56,6 +57,7 @@ func main() {
 	apiKey := flag.String("api-key", env("HOOKLINE_API_KEY", "dev-key"), "producer API key")
 	secret := flag.String("secret", env("HOOKLINE_SIGNING_SECRET", "whsec_dev"), "fallback HMAC signing secret for unregistered endpoints")
 	databaseURL := flag.String("database-url", env("HOOKLINE_DATABASE_URL", ""), "PostgreSQL DSN; empty runs in memory")
+	walDir := flag.String("wal-dir", env("HOOKLINE_WAL_DIR", ""), "directory for the WAL queue; durable queue with in-memory audit/registry/DLQ (ignored if -database-url is set)")
 	concurrency := flag.Int("concurrency", 8, "concurrent deliveries")
 	flag.Parse()
 
@@ -64,7 +66,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	be, err := newBackend(ctx, *databaseURL, log)
+	be, err := newBackend(ctx, *databaseURL, *walDir, log)
 	if err != nil {
 		log.Error("hookline: configure storage", "err", err)
 		os.Exit(1)
@@ -148,9 +150,26 @@ func main() {
 // newBackend builds the storage layer. An empty databaseURL selects the
 // in-memory backend; otherwise it connects to Postgres, sharing one pool across
 // the queue, audit log, registry, and DLQ, and migrates every table.
-func newBackend(ctx context.Context, databaseURL string, log *slog.Logger) (backend, error) {
+func newBackend(ctx context.Context, databaseURL, walDir string, log *slog.Logger) (backend, error) {
 	if databaseURL == "" {
-		log.Info("hookline: using in-memory storage (set -database-url for durability)")
+		// WAL backs only the queue; audit/registry/DLQ stay in memory. This is
+		// the from-scratch durable-queue configuration.
+		if walDir != "" {
+			q, err := wal.Open(walDir)
+			if err != nil {
+				return backend{}, fmt.Errorf("open wal: %w", err)
+			}
+			log.Info("hookline: using WAL queue (audit/registry/DLQ in memory)", "dir", walDir)
+			return backend{
+				queue:    q,
+				audit:    audit.NewMemoryLog(0),
+				registry: endpoint.NewMemoryRegistry(),
+				dlq:      &delivery.MemoryDeadLetterSink{},
+				close:    func() { _ = q.Close() },
+			}, nil
+		}
+
+		log.Info("hookline: using in-memory storage (set -database-url or -wal-dir for durability)")
 		return backend{
 			queue:    queue.NewMemoryQueue(),
 			audit:    audit.NewMemoryLog(0),
