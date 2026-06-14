@@ -1,6 +1,7 @@
 # Hookline Design
 
-**Status:** Week 1 draft — core abstractions and delivery semantics.
+**Status:** Feature-complete — all ten roadmap milestones shipped. See
+[WRITEUP.md](WRITEUP.md) for the engineering narrative and measured results.
 **Author:** Sean Kim
 
 Hookline is a self-hostable webhook delivery service: producers POST events,
@@ -31,9 +32,9 @@ interface (`internal/queue`) with three planned implementations:
 
 | Implementation | Purpose | Status |
 |---|---|---|
-| `MemoryQueue` | Reference implementation; used by tests and local dev | Done (week 1) |
-| `PostgresQueue` | MVP backend — `SELECT ... FOR UPDATE SKIP LOCKED` | Done (week 2-3) |
-| `WALQueue` | The headline: segmented append-only log + offsets | Planned (week 5-7) |
+| `MemoryQueue` | Reference implementation; used by tests and local dev | Done |
+| `PostgresQueue` | Durable backend — `SELECT ... FOR UPDATE SKIP LOCKED` | Done |
+| `wal.Queue` | The headline: CRC-framed segmented log + crash recovery + compaction | Done |
 
 All implementations must pass one shared conformance test suite. If the WAL
 engine slips, the product still ships on Postgres and the WAL becomes a
