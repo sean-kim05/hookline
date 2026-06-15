@@ -53,7 +53,7 @@ type backend struct {
 }
 
 func main() {
-	addr := flag.String("addr", ":8080", "HTTP listen address for the API")
+	addr := flag.String("addr", defaultAddr(), "HTTP listen address for the API")
 	apiKey := flag.String("api-key", env("HOOKLINE_API_KEY", "dev-key"), "producer API key")
 	secret := flag.String("secret", env("HOOKLINE_SIGNING_SECRET", "whsec_dev"), "fallback HMAC signing secret for unregistered endpoints")
 	databaseURL := flag.String("database-url", env("HOOKLINE_DATABASE_URL", ""), "PostgreSQL DSN; empty runs in memory")
@@ -232,4 +232,17 @@ func env(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// defaultAddr picks the listen address, honouring the conventions of managed
+// platforms: an explicit HOOKLINE_ADDR wins; otherwise a PORT env var (set by
+// Render, Railway, Fly, Heroku, etc.) becomes ":<port>"; otherwise :8080.
+func defaultAddr() string {
+	if a := os.Getenv("HOOKLINE_ADDR"); a != "" {
+		return a
+	}
+	if p := os.Getenv("PORT"); p != "" {
+		return ":" + p
+	}
+	return ":8080"
 }

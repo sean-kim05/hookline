@@ -1,0 +1,33 @@
+# Render blueprint: deploy Hookline (API + managed PostgreSQL) from this repo.
+#
+# In Render: New > Blueprint > connect this GitHub repo. Render builds the
+# Dockerfile, provisions the database, wires HOOKLINE_DATABASE_URL, and gives
+# the service a public HTTPS URL. Set the two secret env vars when prompted.
+#
+# Note: Prometheus/Grafana from docker-compose are not deployed here (PaaS runs
+# one service); point Grafana Cloud's free tier at /metrics later if you want
+# dashboards. The API still exposes /metrics.
+services:
+  - type: web
+    name: hookline
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      # Render injects PORT; cmd/hookline binds it automatically (defaultAddr).
+      - key: HOOKLINE_API_KEY
+        sync: false # set a strong value in the Render dashboard (secret)
+      - key: HOOKLINE_SIGNING_SECRET
+        sync: false # set a strong value in the Render dashboard (secret)
+      - key: HOOKLINE_DATABASE_URL
+        fromDatabase:
+          name: hookline-db
+          property: connectionString
+
+databases:
+  - name: hookline-db
+    plan: free
+    databaseName: hookline
+    user: hookline
