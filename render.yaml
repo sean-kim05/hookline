@@ -26,6 +26,30 @@ services:
           name: hookline-db
           property: connectionString
 
+  # The Next.js operator dashboard (the frontend). It talks to the API only via
+  # its server-side proxy, so the API key stays server-side. Basic-auth gated.
+  - type: web
+    name: hookline-dashboard
+    runtime: node
+    rootDir: dashboard
+    plan: free
+    buildCommand: npm ci --include=dev && npm run build
+    startCommand: npm start
+    autoDeploy: true
+    envVars:
+      # Set to the hookline API's public URL after its first deploy, e.g.
+      # https://hookline.onrender.com
+      - key: HOOKLINE_URL
+        sync: false
+      # Must match the API service's HOOKLINE_API_KEY.
+      - key: HOOKLINE_API_KEY
+        sync: false
+      # Dashboard login (Basic auth). Username defaults to "admin".
+      - key: DASHBOARD_USER
+        value: admin
+      - key: DASHBOARD_PASSWORD
+        sync: false
+
 databases:
   - name: hookline-db
     plan: free
